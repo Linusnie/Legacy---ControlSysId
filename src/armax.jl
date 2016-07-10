@@ -33,7 +33,7 @@ end
 
 Compute the ARMAX(`na`,`nb`,`nc`,`nd`) model:
     A(z)y(t) = z^-`nk`B(z)u(t) + C(z)e(t)
-that minimizes the mean square prediction error for time-domain iddata `d`. The initial guess should be of the form `x0 = [A; B; C]` where `A`, `B` and `C` are vectors.""" ->
+that minimizes the mean square one-step-ahead prediction error for time-domain iddata `d`. The initial guess should be of the form `x0 = [A; B; C]` where `A`, `B` and `C` are vectors.""" ->
 
 function armax(d::iddataObject, x0, na::Int, nb::Int, nc, nk::Int=0; autodiff::Bool = false)
     M, N = max(na,nb,nc) + 1, length(d.y)

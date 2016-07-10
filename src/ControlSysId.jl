@@ -11,6 +11,7 @@ export
         # utilities
         detrend,
         detrend!,
+        dare,
         # identification methods
         arx,
         armax,
