@@ -4,21 +4,26 @@ type StateSpaceModel{T<:Real}
     C::Vector{T}
     D::T
     K::Vector{T}
-    Re::Array{T}
-    Ts::Real
+    Q::Array{T}
+    R::Array{T}
+    S::Array{T}
+    Ts::Float64
     n::Int
-    MSE::Real
-    fit::Real
+    MSE::Float64
+    fit::Float64
     method::Symbol
 
-    function call{T}(::Type{StateSpaceModel}, A::Matrix{T}, B::Vector{T}, C::Vector{T}, D::T, K::Vector{T}, Re::Array{T}, Ts::Real, MSE::Real, fit::Real, method::Symbol)
+    function call{T}(::Type{StateSpaceModel}, A::Matrix{T}, B::Vector{T}, C::Vector{T}, D::T, K::Vector{T}, Q::Array{T}, R::Array{T}, S::Array{T}, Ts::Float64, MSE::Float64, fit::Float64, method::Symbol)
         n = size(A)[1]
 
         Ts<0 && error("Ts must be nonnegative")
 
-        return new{T}(A, B, C, D, K, Re, Ts, n, MSE, fit, method)
+        return new{T}(A, B, C, D, K, Q, R, S, Ts, n, MSE, fit, method)
     end
 end
+
+# overload max() to deal with single entries
+Base.max(x) = x
 
 #####################################################################
 ##                      Constructor Functions                      ##
@@ -26,7 +31,7 @@ end
 @doc """`m = n4sid(d, n, i=n+1, h=i)`
 
 Compute a state space model of order `n` based on time-domain iddata `d` using the n4sid method. If an unstable system is returned try increasing the number of samples or tweaking `i` and `h`.""" ->
-function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i, gamma=0.95)
+function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i; gamma=0.95)
     y, u = d.y, d.u
     N = length(y)
 
@@ -39,7 +44,6 @@ function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i, g
     2(h+i) < j || error("Not enough input data for identification: must have h+i<(N+1)/3")
     # make sure number of lags is larger than the model order
     n < i | n < h && error("There must be at least as many lags as the model order")
-
 
     Up = Float64[u[k+t+1] for k = 0:i-1, t = 0:j-1]
     Uf = Float64[u[k+t+1] for k = i:i+h-1, t = 0:j-1]
@@ -85,7 +89,9 @@ function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i, g
     # Add a regularization term if Ahat is unstable (see `Identification of Stable Models in Subspace Identification by Using Regularization` by T. Van Gestel, J. A. K. Suykens, P. Van Dooren, and B. De Moor). Currently the only option is W = eye(n).
     # this only works for single input atm
     Ahat = Theta[1:n, 1:n]
+    reg = false
     if any(abs(eigfact(Ahat)[:values]) .> 1)
+        reg = true
         println("unstable estimate: regularizing")
 
         F = qrfact(hcat(u[i+1:i+j], Xhat'))
@@ -118,9 +124,10 @@ function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i, g
     S = Sigma[1:n, n+1:end]
 
     # calculate Kalman gain (note that Chat is stored as a column vector here)
-    P = dare(Ahat, Chat, Q, R, S)
-    Khat = collect((Ahat*P*Chat + S)*inv(Chat'*P*Chat + R))
+    P = dare(Ahat', Chat, Q, R, S)
+    Khat = collect((Chat'*P*Chat + R)\(Ahat*P*Chat + S)')
 
+    # integrate estimated system (replace with lsim later)
     x = zeros(n)
     y_est = Array{Float64}(N)
     for i=1:N
@@ -132,7 +139,7 @@ function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i, g
     MSE = sum((y-y_est).^2)/N
     fit = 100 * (1 - sqrt(N*MSE)/norm(y-mean(y)))
 
-    return StateSpaceModel(Ahat, Bhat, Chat, Dhat, Khat, R,  d.Ts, MSE, fit, :n4sid)
+    return StateSpaceModel(Ahat, Bhat, Chat, Dhat, Khat, Q, R, S, d.Ts, MSE, fit, :n4sid)
 end
 
 #####################################################################
