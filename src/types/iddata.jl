@@ -22,14 +22,14 @@ Do this instead: arx,arma,ar,... <: LTIModel
 type iddataObject{T<:Real}
     y::Array{T}
     u::Array{T}
-    Ts::Real
+    Ts::Float64
     N::Int
     nu::Int
     ny::Int
     inputnames::Vector{UTF8String}
     outputnames::Vector{UTF8String}
 
-    function call{T}(::Type{iddataObject}, y::Array{T}, u::Array{T}, Ts::Real, outputnames, inputnames)
+    function call{T}(::Type{iddataObject}, y::Array{T}, u::Array{T}, Ts::Float64, outputnames, inputnames)
         N   = size(y, 1);
         ny  = size(y, 2);
         nu  = size(u, 2);
@@ -61,7 +61,7 @@ end
 
 Creates an iddataObject that can be used for System Identification. y and u should have the data arranged in columns.
 Use for example sysIdentData = iddata(y1,[u1 u2],Ts,"Out",["In1" "In2"])""" ->
-function iddata(y::Array, u::Array, Ts=1; kwargs...)
+function iddata(y::Array, u::Array, Ts=1.; kwargs...)
     nu = size(u,2)
     ny = size(y,2)
 

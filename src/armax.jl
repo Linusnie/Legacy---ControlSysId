@@ -29,13 +29,15 @@ end
 #####################################################################
 ##                      Constructor Functions                      ##
 #####################################################################
-@doc """`m = armax(d, x0, na, nb, nc, nk=0)`
+@doc """`m = armax(d, na, nb, nc, nk=1)`
 
 Compute the ARMAX(`na`,`nb`,`nc`,`nd`) model:
     A(z)y(t) = z^-`nk`B(z)u(t) + C(z)e(t)
-that minimizes the mean square one-step-ahead prediction error for time-domain iddata `d`. The initial guess should be of the form `x0 = [A; B; C]` where `A`, `B` and `C` are vectors.""" ->
+that minimizes the mean square one-step-ahead prediction error for time-domain iddata `d`. An initial parameter guess can be provided by adding `x0 = [A; B; C]` to the argument list, where `A`, `B` and `C` are vectors. To use automatic differentiation add `autodiff=true`.""" ->
 
-function armax(d::iddataObject, x0, na::Int, nb::Int, nc, nk::Int=0; autodiff::Bool = false)
+function armax(d::iddataObject, na::Int, nb::Int, nc, nk::Int=1;
+                x0::AbstractArray = vcat(init_cond(d.y, d.u, na, nb, nc)...),
+                autodiff::Bool = false)
     M, N = max(na,nb,nc) + 1, length(d.y)
     n = [na, nb, nc, nk]
     k = na + nb + nc
@@ -204,7 +206,7 @@ end
 function Base.showall(io::IO, m::ArmaxModel)
     A, B, C = m.A, m.B, m.C
     na, nb, nc, nk = m.na, m.nb, m.nc, m.nk
-    print(io,   "Discrete-time ARMAX$((m.na,m.nb,m.nc,m.nk)) model: A(z)y = B(z)u + C(z)e\n",
+    print(io,   "Discrete-time ARMAX$((na,nb,nc,nk)) model: A(z)y = B(z)u + C(z)e\n",
                 "\nA(z) = 1",
                 [" $(A[i]<0?(:-):(:+)) $(abs(A[i]))z^-$i" for i=1:na]...,"\n",
                 "\nB(z) = $(B[1])$(nk!=0 ? "z^-$nk" : "")",
