@@ -1,24 +1,22 @@
-type StateSpaceModel{T<:Real}
-    A::Matrix{T}
-    B::Vector{T}
-    C::Vector{T}
-    D::T
-    K::Vector{T}
-    Q::Array{T}
-    R::Array{T}
-    S::Array{T}
+type StateSpaceModel{T<:Real, M1<:AbstractMatrix{T},M2<:AbstractMatrix{T}, M3<:AbstractMatrix{T}, M4<:AbstractMatrix{T}, M5<:AbstractMatrix{T}, M6<:AbstractMatrix{T}}
+    A::M1
+    B::M2
+    C::M3
+    D::M4
+    K::M5
+    Sigma::M6
     Ts::Float64
     n::Int
     MSE::Float64
     fit::Float64
     method::Symbol
 
-    function call{T}(::Type{StateSpaceModel}, A::Matrix{T}, B::Vector{T}, C::Vector{T}, D::T, K::Vector{T}, Q::Array{T}, R::Array{T}, S::Array{T}, Ts::Float64, MSE::Float64, fit::Float64, method::Symbol)
-        n = size(A)[1]
+    function call{M1<:AbstractMatrix,M2<:AbstractMatrix, M3<:AbstractMatrix,M4<:AbstractMatrix, M5<:AbstractMatrix, M6<:AbstractMatrix}(::Type{StateSpaceModel}, A::M1, B::M2, C::M3, D::M4, K::M5, Sigma::M6, Ts::Float64, MSE::Float64, fit::Float64, method::Symbol)
+        n = size(A, 1)
 
-        Ts<0 && error("Ts must be nonnegative")
+        T = promote_type(eltype(A), eltype(B), eltype(C), eltype(D), eltype(K), eltype(Sigma))
 
-        return new{T}(A, B, C, D, K, Q, R, S, Ts, n, MSE, fit, method)
+        return new{T,M1,M2,M3,M4,M5,M6}(A, B, C, D, K, Sigma, Ts, n, MSE, fit, method)
     end
 end
 
@@ -33,113 +31,85 @@ Base.max(x) = x
 Compute a state space model of order `n` based on time-domain iddata `d` using the n4sid method. If an unstable system is returned try increasing the number of samples or tweaking `i` and `h`.""" ->
 function n4sid(d::iddataObject, n::Int=-1, i::Int=(n==-1 ? 5 : n+1), h::Int=i; gamma=0.95)
     y, u = d.y, d.u
-    N = length(y)
+    N, ny = size(y,1,2)
+    nu = size(u, 2)
 
     # Arrange data as a Hankel matrix with j columns and i+h row (i past, h future)
     j = N - i - h + 1
 
-    # make sure data is siso
-    size(y, 2) == 1 ||  error("n4sid only impoemented for siso systems so far")
     # make sure vcat(Uf, Wp, Yf) is a fat matrix
     2(h+i) < j || error("Not enough input data for identification: must have h+i<(N+1)/3")
     # make sure number of lags is larger than the model order
     n < i | n < h && error("There must be at least as many lags as the model order")
 
-    Up = Float64[u[k+t+1] for k = 0:i-1, t = 0:j-1]
-    Uf = Float64[u[k+t+1] for k = i:i+h-1, t = 0:j-1]
-
-    Yp = Float64[y[k+t+1] for k = 0:i-1, t = 0:j-1]
-    Yf = Float64[y[k+t+1] for k = i:i+h-1, t = 0:j-1]
-
+    # Construct Block-Hankel arrays from input/output data
+    Up, Uf, Yp, Yf = hankel_data(y, u, i, h)
     Wp = vcat(Up, Yp)
-    Wpp = vcat(Up, Uf[1,:], Yp, Yf[1,:])
+    Wpp = vcat(Up, Uf[1:nu,:], Yp, Yf[1:ny,:])
 
     #=
-    compute Yf/Wp along Uf using LQ-factorization as described in `Subspace Identification Methods`, Pavel Trnka. An equivalent calculation would be:
-        Oh = Yf * hcat(Wp', Uf')*inv((vcat(Wp, Uf)*hcat(Wp', Uf')))[:,1:2*i]*Wp
+    compute the oblique projection Yf/Wp along Uf. An equivalent calculation would be:
+    Oh = Yf * hcat(Wp', Uf')*inv((vcat(Wp, Uf)*hcat(Wp', Uf')))[:,1:2*i]*Wp
     Might be possible to speed this up by exploiting Hankel structure...
     =#
-    # only need the R here.
-    F = qrfact(vcat(Uf, Wp, Yf).')
-    L = F[:R].'
-    L32 = L[end-h+1:end, h+1:h+2i]
-    L22 = L[h+1:h+2i, h+1:h+2i]
-    Oh = L32 * (L22 \ Wp)
+    i1, i2, i3 = h*nu, i*(nu+ny), h*ny
+    I = i1+i2+i3
 
-    F1 = qrfact(vcat(Uf[2:end, :], Wpp, Yf[2:end,:]).')
-    copy!(L, F1[:R].')
-    L32 = L[end-h+2:end, h:h+2i+1]
-    L22 = L[h:h+2i+1, h:h+2i+1]
-    Oh1 = L32 * (L22 \ Wpp)
+    M = Array{Float64}(I, j)
+    M[1:i1,:] = Uf
+    M[i1+1:i1+i2,:] = Wp
+    M[i1+i2+1:end,:] = Yf
 
-    # Calculate SVD and use only information corresponding to the `k` largest singular values
-    U, S, V = svd(Oh)
+    L = Array{Float64}(I, I)
+    Oh = obl_proj(M, L, i1, i2, i3)
+
+    # same for Yf-/Wp+ along Uf-
+    M[1:(h+i)*nu,:] = M[[nu+1:(h+i)*nu; 1:nu],:]
+    Oh1 = obl_proj(M, L, i1-nu, i2+nu+ny, i3-nu)
+
+    # Calculate SVD and use only information corresponding to the `n` largest singular values
+    svdinfo = svdfact(Oh)
+    S, U = svdinfo[:S], svdinfo[:U]
+
     n==-1 && (n = sum(S .> sqrt(S[1]*S[end])))
     Gam = U[:,1:n] * diagm(sqrt(S[1:n]))
 
     # Compute estimate of state trajectory (Xhat1 is approximately Xhat time-shifted one step forward)
     Xhat = Gam \ Oh
-    Xhat1 = Gam[1:end-1,:] \ Oh1
+    Xhat1 = Gam[1:end-ny,:] \ Oh1
 
     # Estimate model parameters as Theta = [Ahat Bhat; Chat Dhat]
-    XU = vcat(Xhat, u[i+1:i+j]')
-    XY = vcat(Xhat1, y[i+1:i+j]')
+    XU = vcat(Xhat, u[i+1:i+j,:]')
+    XY = vcat(Xhat1, y[i+1:i+j,:]')
     Theta = (XU' \ XY')'
 
-    # Add a regularization term if Ahat is unstable (see `Identification of Stable Models in Subspace Identification by Using Regularization` by T. Van Gestel, J. A. K. Suykens, P. Van Dooren, and B. De Moor). Currently the only option is W = eye(n).
-    # this only works for single input atm
     Ahat = Theta[1:n, 1:n]
-    reg = false
     if any(abs(eigfact(Ahat)[:values]) .> 1)
-        reg = true
-        println("unstable estimate: regularizing")
-
-        F = qrfact(hcat(u[i+1:i+j], Xhat'))
-        R22 = F[:R][2:end, 2:end]
-        S = R22' * R22
-
-        P2 = - gamma^2 * eye(n^2)
-        P1 = - gamma^2 * kron(eye(n), S) - gamma^2 * kron(S, eye(n))
-        P0 = kron(Ahat*S, Ahat*S) - gamma^2 * kron(S, S)
-
-        # solve generalized eigenvalue problem and find the largest real+positive eigenvalue
-        theta = eigfact([zeros(n^2,n^2) -eye(n^2); P0 P1], -[eye(n^2) zeros(n^2,n^2); zeros(n^2, n^2) P2])[:values]
-        c = max(abs(theta[(imag(theta) .== 0 ) .* (real(theta) .> 0)])...)
-
-        # multiply [Ahat Bhat] with regularization term
-        S_XU = XU * XU'
-        Theta[1:n,:] *= S_XU * inv(S_XU + c*[eye(n) zeros(n,1); zeros(1, n+1)])
+        stabilize!(Theta, Ahat, XU, i, j, ny, nu, n, gamma)
     end
 
-    Ahat = Theta[1:n,1:n]
-    Bhat = collect(Theta[1:n, n+1:end])
-    Chat = collect(Theta[n+1:end, 1:n])
-    Dhat = Theta[n+1:end, n+1:end][1]
+    copy!(Ahat, Theta[1:n,1:n])
+    Bhat = Theta[1:n, n+1:end]
+    Chat = Theta[n+1:end, 1:n]
+    Dhat = Theta[n+1:end, n+1:end]
 
     # Estimate noise parameters
-    eps = XY - Theta*XU
-    Sigma = 1/(j-(n+1)) * eps * eps'
-    Q = Sigma[1:n, 1:n]
-    R = Sigma[n+1:end, n+1:end]
-    S = Sigma[1:n, n+1:end]
-
-    # calculate Kalman gain (note that Chat is stored as a column vector here)
-    P = dare(Ahat', Chat, Q, R, S)
-    Khat = collect((Chat'*P*Chat + R)\(Ahat*P*Chat + S)')
+    Khat, Sigma = noise_param(Theta, Ahat, Chat, XY, XU, n, j)
 
     # integrate estimated system (replace with lsim later)
     x = zeros(n)
-    y_est = Array{Float64}(N)
+    y_est = Array{Float64}(N,ny)
     for i=1:N
-        y_est[i] = dot(Chat, x) + Dhat*u[i]
-        x = Ahat*x + Bhat*u[i] + Khat*(y[i] - y_est[i])
+        y_est[i,:] = Chat*x + Dhat*u[i,:]'
+        x = Ahat*x + Bhat*u[i,:]' + Khat*(y[i,:] - y_est[i,:])'
     end
 
     # determine quality of fit
-    MSE = sum((y-y_est).^2)/N
-    fit = 100 * (1 - sqrt(N*MSE)/norm(y-mean(y)))
+    E = sum(x->x^2, y-y_est)
+    MSE = E/N
+    fit = 100 * (1 - sqrt(E)/norm(y .- mean(y,1)))
 
-    return StateSpaceModel(Ahat, Bhat, Chat, Dhat, Khat, Q, R, S, d.Ts, MSE, fit, :n4sid)
+    return StateSpaceModel(Ahat, Bhat, Chat, Dhat, Khat, Sigma, d.Ts, MSE, fit, :n4sid)
 end
 
 #####################################################################
@@ -167,30 +137,82 @@ function Base.showall(io::IO, m::StateSpaceModel)
                 "Fit: $(m.fit) %, MSE: $(m.MSE), method: $(m.method)")
 end
 
-#=  Example:
-    A = [-1.5 -0.66 -0.32;
-         1  0 0;
-         0 0.25 0]
-    B = [1,0,0]
-    C = [0,1,-0.4]
-    D = 0
-    K = [2,0,1]
+function hankel_data(y, u, i, h)
+    N, ny = size(y,1,2)
+    nu = size(u, 2)
+    j = N - i - h + 1
 
-
-    N = 100
-    u = randn(N)
-    e = randn(N) / 10
-    y = Array{Float64}(N)
-    x = zeros(3)
-
-    for i=1:N
-        y[i] = dot(C, x) + D*u[i] + e[i]
-        x = A*x + B*u[i] + K*e[i]
+    Up = Array{Float64}(i*nu, j)
+    for k = 0:i-1, iu = 1:nu, t = 0:j-1
+        Up[nu*k+iu, t+1] = u[k+t+1, iu]
     end
 
+    Uf = Array{Float64}(h*nu, j)
+    for k = 0:h-1, iu = 1:nu, t = 0:j-1
+        Uf[nu*k+iu, t+1] = u[i+k+t+1, iu]
+    end
 
-    d = iddata(y,u)
+    Yp = Array{Float64}(i*ny, j)
+    for k = 0:i-1, iy = 1:ny, t = 0:j-1
+        Yp[ny*k+iy, t+1] = y[k+t+1, iy]
+    end
 
-    m = n4sid(d, 3, 4, 4)
-    showall(m)
+    Yf = Array{Float64}(h*ny, j)
+    for k = 0:h-1, iy = 1:ny, t = 0:j-1
+        Yf[ny*k+iy, t+1] = y[i+k+t+1, iy]
+    end
+    return Up, Uf, Yp, Yf
+end
+
+#=
+compute the oblique projection A/C along B using LQ-factorization as described in `Subspace Identification Methods`, Pavel Trnka. L has to be initialized outside the function
+
+notation: M = [B;C;A]
+          j,k and l are the number of rows in B,C and A respectively
 =#
+function obl_proj(M, L, j, k, l)
+    F = qrfact(M.')
+    copy!(L, F[:R].')
+    L32 = L[j+k+1:end, j+1:j+k]
+    L22 = L[j+1:j+k, j+1:j+k]
+    return L32 * (L22 \ M[j+1:j+k,:])
+end
+
+#=
+Impose stability on the estimated system by adding a regularization term. This is equivalent to minimizing ||AX - BU||^2 + c||A||^2 (in Forbenius norm). `c` is picked so that the spectral radius of `Ahat` is exactly `gamma` (i.e. the modified estimate is guaranteed to be stable for `gamma` < 1).
+
+See Gestel, Suykens, Dooren, Moor `Imposing Stability in Subspace Identification by Regularization`.
+=#
+function stabilize!(Theta, Ahat, XU, i, j, ny, nu, n, gamma)
+    UX = XU[[n+1:end; 1:n],:]'
+
+    F = qrfact(UX)
+    R22 = F[:R][nu+1:end, nu+1:end]
+    S = R22' * R22
+
+    P2 = - gamma^2 * eye(n^2)
+    P1 = - gamma^2 * kron(eye(n), S) - gamma^2 * kron(S, eye(n))
+    P0 = kron(Ahat*S, Ahat*S) - gamma^2 * kron(S, S)
+
+    # solve generalized eigenvalue problem and find the largest real+positive eigenvalue
+    theta = eigfact([zeros(n^2,n^2) -eye(n^2); P0 P1], -[eye(n^2) zeros(n^2,n^2); zeros(n^2, n^2) P2])[:values]
+    c = max(abs(theta[(imag(theta) .== 0 ) .* (real(theta) .> 0)])...)
+
+    # multiply [Ahat Bhat] with regularization term
+    S_XU = XU * XU'
+    Theta[1:n,:] *= S_XU * inv(S_XU + c*[eye(n) zeros(n,nu); zeros(nu, n+nu)])
+end
+
+# Estimate nosie parameters from state estimate and system model
+function noise_param(Theta, A, C, XY, XU, n, j)
+    eps = XY - Theta*XU
+    Sigma = 1/(j-(n+1)) * eps * eps'
+    Q = Sigma[1:n, 1:n]
+    R = Sigma[n+1:end, n+1:end]
+    S = Sigma[1:n, n+1:end]
+
+    # calculate Kalman gain
+    P = dare(A', C', Q, R, S)
+    K = ((C*P*C' + R)\(A*P*C' + S)')'
+    return K, Sigma
+end
