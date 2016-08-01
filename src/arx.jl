@@ -35,6 +35,18 @@ function arx(d::iddataObject, na::Int, nb::Int, nk = 0)
     size(y,2) != 1 | size(u,2) != 1 && error("arx only implemented for siso")
     na < 1 | nb < 1 | nk < 0 && error("arx parameters must have na,nb > 0 and nk >= 0")
 
+    theta, Phi = arx_(y, u, na, nb, nk)
+    A = theta[1:na]
+    B = theta[na+1:end]
+
+    # Calculate model error
+    MSE = norm(y[M:N]-Phi*theta)
+    fit = 100*(1 - MSE/norm(y[M:N]-mean(y[M:N])))
+
+    return ArxModel(A, B, d.Ts, nk, MSE/(N-M), fit)
+end
+
+function arx_(y, u, na, nb, nk)
     # Number of samples
     N = length(y)
 
@@ -50,14 +62,7 @@ function arx(d::iddataObject, na::Int, nb::Int, nk = 0)
         Phi[i-M+1,:] = hcat(-y[i-1:-1:i-na]', u[i-nk:-1:i-nk-nb+1]')
     end
     theta = Phi\y[M:N]
-    A = theta[1:na]
-    B = theta[na+1:end]
-
-    # Calculate model error
-    MSE = norm(y[M:N]-Phi*theta)
-    fit = 100*(1 - MSE/norm(y[M:N]-mean(y[M:N])))
-
-    return ArxModel(A, B, d.Ts, nk, MSE/(N-M), fit)
+    return theta, Phi
 end
 
 function Base.show(io::IO, m::ArxModel)

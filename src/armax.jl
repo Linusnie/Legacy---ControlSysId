@@ -2,7 +2,7 @@
 ##                      Data Type Declarations                     ##
 #####################################################################
 
-type ArmaxModel{T<:Real}
+type ArmaxModel{T<:Real} <: LTIModel
     A::Vector{T}
     B::Vector{T}
     C::Vector{T}
@@ -38,8 +38,9 @@ that minimizes the mean square one-step-ahead prediction error for time-domain i
 function armax(d::iddataObject, na::Int, nb::Int, nc, nk::Int=1;
                 x0::AbstractArray = vcat(init_cond(d.y, d.u, na, nb, nc)...),
                 autodiff::Bool = false)
-    M, N = max(na,nb,nc) + 1, length(d.y)
-    n = [na, nb, nc, nk]
+    N = size(d.y, 1)
+    M = max(na, nb+nk-1, nc)+1
+    n = [na,nb,nc,nk]
     k = na + nb + nc
 
     # detect input errors
@@ -47,22 +48,7 @@ function armax(d::iddataObject, na::Int, nb::Int, nc, nk::Int=1;
     M>N             && error("Not enough datapoints to fit ARMAX($na,$nb,$nc,$nk) model")
     length(x0) != k && error("Used initial guess of length $(length(x0)) for ARMAX model with $k parameters")
 
-    last_V  = [-1.]
-    last_x  = Array{Float64}(k)
-
-    if !autodiff
-        storage = Array{Float64}(k, k+1)
-
-        # Construct TwiceDifferentiableFunction (stores value function, gradient and Hessian. See Optim.jl documentaiton)
-        df = TwiceDifferentiableFunction(x    -> calc_armax_der!(d, n, x, last_x, last_V, storage),
-                                        (x,g) -> g!(d, n, x, last_x, last_V, g, storage),
-                                        (x,H) -> h!(d, n, x, last_x, last_V, H, storage))
-
-        # perform optimization (Newton's method)
-        opt = optimize(df, x0, iterations = 10^4)
-    else
-        opt = optimize(x -> calc_armax(d, n, x, last_x, last_V), x0, iterations = 10^4, autodiff = true)
-    end
+    opt = PEM(d, :armax, n, x0, autodiff)
 
     # extract results from opt
     x = opt.minimum
@@ -76,61 +62,43 @@ function armax(d::iddataObject, na::Int, nb::Int, nc, nk::Int=1;
     return ArmaxModel(x[1:na], x[na+1:na+nb], x[na+nb+1:end], d.Ts, nk, MSE, fit, opt)
 end
 
-# helper functions for TwiceDifferentiableFunction
-function g!(d, n, x, last_x, last_V, g, storage)
-    calc_armax_der!(d, n, x, last_x, last_V, storage)
-    copy!(g, storage[:, end])
-end
-function h!(d, n, x, last_x, last_V, H, storage)
-    calc_armax_der!(d, n, x, last_x, last_V, storage)
-    copy!(H, storage[:,1:end-1])
-end
-
 # Calculate the value function V. Used for automatic differentiation
-function calc_armax(d, n, x, last_x, last_V)
-    # check if this is a new point
-    if x != last_x
-        # update last_x
-        copy!(last_x, x)
+function calc_armax(d, n, x)
+    y, u = d.y, d.u
+    na, nb, nc, nk = (n...)
 
-        y, u = d.y, d.u
-        na, nb, nc, nk = (n...)
+    A = x[1:na]
+    B = x[na+1:na+nb]
+    C = x[na+nb+1:end]
 
-        A = x[1:na]
-        B = x[na+1:na+nb]
-        C = x[na+nb+1:end]
+    N = length(y)
+    M = max(na, nb+nk-1, nc)+1
+    k = na+nb+nc
 
-        N = length(y)
-        M = max(na, nb+nk-1, nc)+1
-        k = na+nb+nc
+    y_est = zeros(eltype(x), nc)
 
-        y_est = zeros(nc)
+    # initiate value function
+    V = 0
 
-        # initiate value function
-        V = 0
+    # integrate the model and calculate the prediction error
+    for i = M:N
+        # only the last nc values of Phi and y_est needs to be stored at any point in time
+        j = mod(i-1, nc) + 1
+        inds = mod((i-1:-1:i-nc)-1, nc) + 1
 
-        # integrate the model and calculate the prediction error
-        for i = M:N
-            # only the last nc values of Phi and y_est needs to be stored at any point in time
-            j = mod(i-1, nc) + 1
-            inds = mod((i-1:-1:i-nc)-1, nc) + 1
+        # calculate one step ahead prediction
+        y_est[j] =  - dot(A, y[i-1:-1:i-na]) + dot(B, u[i-nk:-1:i-nb-nk+1]) + dot(C, y[i-1:-1:i-nc] - y_est[inds])
 
-            # calculate one step ahead prediction
-            y_est[j] =  - dot(A, y[i-1:-1:i-na]) + dot(B, u[i-nk:-1:i-nb-nk+1]) + dot(C, y[i-1:-1:i-nc] - y_est[inds])
-
-            # update cost function (prediction error)
-            V   += (y[i] - y_est[j])^2
-        end
-
-        # normalize
-        V /= N-M+1
-
-        # update last_V
-        copy!(last_V, V)
-
-        return V
+        # update cost function (prediction error)
+        V   += (y[i] - y_est[j])^2
     end
-    return last_V[1]
+
+    # normalize
+    V /= N-M+1
+
+    # update last_V
+
+    return V
 end
 
 
@@ -192,6 +160,24 @@ function calc_armax_der!(d, n, x, last_x, last_V, storage)
         return V
     end
     return last_V[1]
+end
+
+#####################################################################
+##                        prediction                               ##
+#####################################################################
+
+timehorizon(m::ArmaxModel) = max(m.na, m.nb+m.nk-1, m.nc) + 1
+function pred(m::ArmaxModel, d::iddataObject)
+    na, nb, nc, nk = m.na, m.nb, m.nc, m.nk
+    y, u = d.y, d.u
+    N = size(y,1)
+    M = timehorizon(m)
+
+    y_est = zeros(N)
+    for i = M:N
+        y_est[i] =  - dot(m.A, y[i-1:-1:i-na]) + dot(m.B, u[i-nk:-1:i-nb-nk+1]) + dot(m.C, y[i-1:-1:i-nc] - y_est[i-1:-1:i-nc])
+    end
+    return y_est
 end
 
 #####################################################################
