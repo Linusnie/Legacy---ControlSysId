@@ -1,3 +1,5 @@
+This is package is kept for legacy reasons, the maintained one will be in [1]
+
 # ControlSysId
 System identification toolbox for Julia
 
@@ -36,3 +38,5 @@ d = iddata(y,u)
 m = armax(d, na, nb, nc)
 showall(m)
 ```
+
+[1] https://github.com/KTH-AC/IdentificationToolbox.jl
